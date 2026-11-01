@@ -16,7 +16,7 @@ ARG CGO_EXTRA_CFLAGS
 COPY --from=xx / /
 ARG TARGETPLATFORM
 RUN apk --no-cache add clang lld
-RUN xx-apk --no-cache add gcc musl-dev
+RUN xx-apk --no-cache add gcc musl-dev linux-pam-dev
 ENV CGO_ENABLED=1
 RUN xx-go --wrap
 #
@@ -36,7 +36,7 @@ WORKDIR ${GOPATH}/src/forgejo.org
 RUN make clean-no-bindata
 RUN make frontend
 RUN go build contrib/environment-to-ini/environment-to-ini.go && xx-verify environment-to-ini
-RUN LDFLAGS="-buildid=" make FORGEJO_GENERATE_SKIP_HASH=true RELEASE_VERSION=$RELEASE_VERSION GOFLAGS="-trimpath" go-check generate-backend static-executable && xx-verify gitea
+RUN LDFLAGS="-buildid=" make FORGEJO_GENERATE_SKIP_HASH=true RELEASE_VERSION=$RELEASE_VERSION GOFLAGS="-trimpath" go-check generate-backend backend && xx-verify gitea
 
 # Copy local files
 COPY docker/root /tmp/local
