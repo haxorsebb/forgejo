@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"slices"
 	"strings"
 
 	"forgejo.org/models/auth"
@@ -22,6 +25,19 @@ import (
 // Authenticate queries if login/password is valid against the PAM,
 // and create a local user if success when enabled.
 func (source *Source) Authenticate(ctx context.Context, user *user_model.User, userName, password string) (*user_model.User, error) {
+	// The appliance policy is opt-in; ordinary Forgejo PAM sources retain their behavior.
+	managedGroups := []string(nil)
+	if marker := os.Getenv("FORGEJO_APPLIANCE_PAM_GROUP_MARKER"); marker != "" {
+		var err error
+		managedGroups, err = applianceManagedGroups(userName, marker)
+		if err != nil {
+			return nil, err
+		}
+		if len(managedGroups) == 0 {
+			return nil, user_model.ErrUserNotExist{Name: userName}
+		}
+	}
+
 	pamLogin, err := pam.Auth(source.ServiceName, userName, password)
 	if err != nil {
 		if errors.Is(err, pam.ErrInvalidCredentials) {
@@ -31,6 +47,15 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 	}
 
 	if user != nil {
+		if managedGroups != nil {
+			isAdmin := slices.Contains(managedGroups, "forgejo-admins")
+			if user.IsAdmin != isAdmin {
+				user.IsAdmin = isAdmin
+				if err := user_model.UpdateUserCols(ctx, user, "is_admin"); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return user, nil
 	}
 
@@ -60,6 +85,7 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 		LoginType:   auth.PAM,
 		LoginSource: source.authSource.ID,
 		LoginName:   userName, // This is what the user typed in
+		IsAdmin:     managedGroups != nil && slices.Contains(managedGroups, "forgejo-admins"),
 	}
 	overwriteDefault := &user_model.CreateUserOverwriteOptions{
 		IsActive: optional.Some(true),
@@ -75,4 +101,28 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 // IsSkipLocalTwoFA returns if this source should skip local 2fa for password authentication
 func (source *Source) IsSkipLocalTwoFA() bool {
 	return source.SkipLocalTwoFA
+}
+
+// applianceManagedGroups identifies the user\x27s supplementary NSS groups marked
+// for appliance-managed Forgejo access. Fail closed on NSS or group lookup errors.
+func applianceManagedGroups(username, marker string) ([]string, error) {
+	out, err := exec.Command("id", "-nG", username).Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Forgejo system groups for %s: %w", username, err)
+	}
+	var managed []string
+	for _, group := range strings.Fields(string(out)) {
+		entry, err := exec.Command("getent", "group", group).Output()
+		if err != nil {
+			return nil, fmt.Errorf("resolve Forgejo group %s: %w", group, err)
+		}
+		parts := strings.SplitN(strings.TrimSpace(string(entry)), ":", 4)
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("malformed NSS group entry for %s", group)
+		}
+		if slices.Contains(strings.Split(parts[3], ","), marker) {
+			managed = append(managed, group)
+		}
+	}
+	return managed, nil
 }
