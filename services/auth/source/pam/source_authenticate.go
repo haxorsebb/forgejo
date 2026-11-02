@@ -12,7 +12,10 @@ import (
 	"slices"
 	"strings"
 
+	"forgejo.org/models"
 	"forgejo.org/models/auth"
+	"forgejo.org/models/organization"
+	"forgejo.org/models/perm"
 	user_model "forgejo.org/models/user"
 	"forgejo.org/modules/auth/pam"
 	"forgejo.org/modules/optional"
@@ -56,6 +59,11 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 				}
 			}
 		}
+		if managedGroups != nil {
+			if err := syncApplianceTeams(ctx, user, managedGroups); err != nil {
+				return nil, err
+			}
+		}
 		return user, nil
 	}
 
@@ -95,6 +103,11 @@ func (source *Source) Authenticate(ctx context.Context, user *user_model.User, u
 		return user, err
 	}
 
+	if managedGroups != nil {
+		if err := syncApplianceTeams(ctx, user, managedGroups); err != nil {
+			return nil, err
+		}
+	}
 	return user, nil
 }
 
@@ -125,4 +138,72 @@ func applianceManagedGroups(username, marker string) ([]string, error) {
 		}
 	}
 	return managed, nil
+}
+
+// syncApplianceTeams delegates team lifecycle and membership to Forgejo.
+ // Before the customer organization exists (initial admin bootstrap), login proceeds.
+func syncApplianceTeams(ctx context.Context, user *user_model.User, managed []string) error {
+    name := os.Getenv("FORGEJO_APPLIANCE_ORG")
+    if name == "" {
+        return nil
+    }
+    org, err := organization.GetOrgByName(ctx, name)
+    if organization.IsErrOrgNotExist(err) {
+        return nil
+    }
+    if err != nil {
+        return err
+    }
+    for _, group := range managed {
+        if strings.EqualFold(group, organization.OwnerTeamName) {
+            continue
+        }
+        team, err := organization.GetTeam(ctx, org.ID, group)
+        if organization.IsErrTeamNotExist(err) {
+            team = &organization.Team{OrgID: org.ID, Name: group, AccessMode: perm.AccessModeNone}
+            if err := models.NewTeam(ctx, team); err != nil {
+                if !organization.IsErrTeamAlreadyExist(err) {
+                    return err
+                }
+                team, err = organization.GetTeam(ctx, org.ID, group)
+            }
+        }
+        if err != nil {
+            return err
+        }
+        member, err := organization.IsTeamMember(ctx, org.ID, team.ID, user.ID)
+        if err != nil {
+            return err
+        }
+        if !member {
+            if err := models.AddTeamMember(ctx, team, user.ID); err != nil {
+                return err
+            }
+        }
+    }
+    // Only reconcile memberships in teams whose names still identify marked
+    // system groups; Forgejo-managed teams (including Owners) are untouched.
+    teams, err := org.GetUserTeams(ctx, user.ID)
+    if err != nil {
+        return err
+    }
+    for _, team := range teams {
+        if team.IsOwnerTeam() || slices.Contains(managed, team.Name) {
+            continue
+        }
+        entry, err := exec.Command("getent", "group", team.Name).Output()
+        if err != nil {
+            continue // application-only team, not a system-managed group
+        }
+        parts := strings.SplitN(strings.TrimSpace(string(entry)), ":", 4)
+        if len(parts) != 4 {
+            return fmt.Errorf("invalid NSS group entry for %s", team.Name)
+        }
+        if slices.Contains(strings.Split(parts[3], ","), os.Getenv("FORGEJO_APPLIANCE_PAM_GROUP_MARKER")) {
+            if err := models.RemoveTeamMember(ctx, team, user.ID); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
 }
