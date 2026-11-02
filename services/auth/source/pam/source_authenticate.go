@@ -116,7 +116,7 @@ func (source *Source) IsSkipLocalTwoFA() bool {
 	return source.SkipLocalTwoFA
 }
 
-// applianceManagedGroups identifies the user\x27s supplementary NSS groups marked
+// applianceManagedGroups identifies the user's supplementary NSS groups marked
 // for appliance-managed Forgejo access. Fail closed on NSS or group lookup errors.
 func applianceManagedGroups(username, marker string) ([]string, error) {
 	out, err := exec.Command("id", "-nG", username).Output()
@@ -141,7 +141,7 @@ func applianceManagedGroups(username, marker string) ([]string, error) {
 }
 
 // syncApplianceTeams delegates team lifecycle and membership to Forgejo.
- // Before the customer organization exists (initial admin bootstrap), login proceeds.
+// Before the customer organization exists (initial admin bootstrap), login proceeds.
 func syncApplianceTeams(ctx context.Context, user *user_model.User, managed []string) error {
     name := os.Getenv("FORGEJO_APPLIANCE_ORG")
     if name == "" {
@@ -161,11 +161,13 @@ func syncApplianceTeams(ctx context.Context, user *user_model.User, managed []st
         team, err := organization.GetTeam(ctx, org.ID, group)
         if organization.IsErrTeamNotExist(err) {
             team = &organization.Team{OrgID: org.ID, Name: group, AccessMode: perm.AccessModeNone}
-            if err := models.NewTeam(ctx, team); err != nil {
-                if !organization.IsErrTeamAlreadyExist(err) {
-                    return err
+            if createErr := models.NewTeam(ctx, team); createErr != nil {
+                if !organization.IsErrTeamAlreadyExist(createErr) {
+                    return createErr
                 }
                 team, err = organization.GetTeam(ctx, org.ID, group)
+            } else {
+                err = nil
             }
         }
         if err != nil {
